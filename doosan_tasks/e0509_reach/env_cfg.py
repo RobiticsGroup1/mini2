@@ -10,7 +10,7 @@ from isaaclab.utils import configclass
 
 import gymnasium as gym
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, UrdfFileCfg
 from isaaclab.sim.spawners.lights import DomeLightCfg
@@ -27,6 +27,7 @@ class DoosanE0509SceneCfg(InteractiveSceneCfg):
     # Each robot arm is mounted on its own desk/stand
     desk: AssetBaseCfg = None
     stand: AssetBaseCfg = None
+    snack: RigidObjectCfg = None
 
     # lights
     dome_light: AssetBaseCfg = AssetBaseCfg(
@@ -170,6 +171,24 @@ class DoosanE0509ReachEnvCfg(DirectRLEnvCfg):
                 ),
             ),
             init_state=AssetBaseCfg.InitialStateCfg(pos=(-0.25, 0.0, 0.05)),
+        ),
+        snack=RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/Snack",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.16, 0.088, 0.024),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.733, 0.063)), # ffbb10
+                physics_material=sim_utils.RigidBodyMaterialCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    collision_enabled=True,
+                    contact_offset=0.005,
+                    rest_offset=0.0
+                ),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.005),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=False,
+                ),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.15, 0.0, 0.047)),
         ),
     )
 
