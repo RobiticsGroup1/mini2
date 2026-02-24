@@ -219,4 +219,4 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
     home_success_dist = 0.05
 
     # Action properties
-    action_scale: float = 0.025
+    action_scale: float = 0.02
