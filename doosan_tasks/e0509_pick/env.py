@@ -153,23 +153,20 @@ class DoosanE0509PickEnv(DirectRLEnv):
         
         # --- Stage 0: Approach ---
         stage_0_mask = (self.task_stage == 0)
-        # Reward distance to snack center (including Z alignment)
-        rewards[stage_0_mask] = torch.exp(-20.0 * dist_ee_snack[stage_0_mask]) * self.cfg.reach_reward_scale
-        # Specifically reward Z-center alignment
-        z_diff = torch.abs(ee_pos_l[:, 2] - snack_pos_l[:, 2])
-        rewards[stage_0_mask] += torch.exp(-50.0 * z_diff[stage_0_mask]) * 5.0
-        
-        # Alignment reward (watching down)
+        # Reward distance to snack TOP (not center): EE approaches from above
+        rewards[stage_0_mask] = torch.exp(-20.0 * dist_ee_snack_top[stage_0_mask]) * self.cfg.reach_reward_scale
+
+        # Alignment reward (gripper pointing down)
         rewards[stage_0_mask] += align_dot[stage_0_mask] * 5.0
         # Reward keeping gripper open (action near -1.0 is open)
         rewards[stage_0_mask] += (1.0 - self._actions[stage_0_mask, 6]) * 2.0
-        
+
         # Penalty for high speed during approach
         rewards[stage_0_mask] -= torch.clamp(ee_speed[stage_0_mask] - 0.5, min=0.0) * 2.0
         # Extra penalty for high speed when very close (slow approach)
-        near_snack = (dist_ee_snack < 0.1) & stage_0_mask
+        near_snack = (dist_ee_snack_top < 0.1) & stage_0_mask
         rewards[near_snack] -= torch.clamp(ee_speed[near_snack] - 0.1, min=0.0) * 10.0
-        
+
         # Penalty for horizontal offset (encourage vertical approach)
         horiz_dist = torch.norm(ee_pos_l[stage_0_mask, :2] - snack_pos_l[stage_0_mask, :2], dim=-1)
         rewards[stage_0_mask] -= horiz_dist * 5.0
@@ -187,8 +184,10 @@ class DoosanE0509PickEnv(DirectRLEnv):
         # Maintain alignment
         rewards[stage_1_mask] += align_dot[stage_1_mask] * 2.0
         
-        # Transition condition: Wait 0.5s to ensure contact physics
-        gripped = (self.stage_timer > 0.5) & (self._actions[:, 6] > 0.8) & stage_1_mask
+        # Transition condition: check actual gripper joint position, not commanded action
+        gripper_q = self.robot.data.joint_pos[:, self.gripper_joint_ids]
+        gripper_closed = gripper_q.mean(dim=-1) > 0.7
+        gripped = (self.stage_timer > 0.5) & gripper_closed & stage_1_mask
         self.task_stage[gripped] = 2
         self.stage_timer[gripped] = 0.0
         rewards[gripped] += self.cfg.lift_success_reward
@@ -209,9 +208,6 @@ class DoosanE0509PickEnv(DirectRLEnv):
         stage_3_mask = (self.task_stage == 3)
         rewards[stage_3_mask] = (1.0 - torch.tanh(dist_ee_home[stage_3_mask] / 0.2)) * self.cfg.home_reward_scale
         rewards[stage_3_mask] += (1.0 - torch.tanh(dist_joint_home[stage_3_mask] / 0.5)) * 10.0
-        # Penalty if snack dropped
-        dropped_mask = snack_pos_l[stage_3_mask, 2] < 0.08
-        rewards[stage_3_mask] -= dropped_mask.float() * 100.0
         # Strong reward keeping gripper closed
         rewards[stage_3_mask] += self._actions[stage_3_mask, 6] * 20.0
         
@@ -228,7 +224,7 @@ class DoosanE0509PickEnv(DirectRLEnv):
         rewards[stage_4_mask] += self._actions[stage_4_mask, 6] * 20.0
         
         # Strong drop penalty for all pick stages
-        dropped_penalty = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05)).float() * 200.0
+        dropped_penalty = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05)).float() * 50.0
         
         # Action/Vel penalties
         r_act = -torch.sum(torch.square(self._actions), dim=-1) * self.cfg.action_penalty_scale

@@ -7,7 +7,7 @@ def sb3_ppo_e0509_cfg():
         "n_epochs": 5,
         "gamma": 0.99,
         "gae_lambda": 0.95,
-        "learning_rate": 3e-4,
+        "learning_rate": 1e-4,
         "clip_range": 0.2,
         "ent_coef": 0.001,
         "vf_coef": 0.5,
@@ -15,6 +15,6 @@ def sb3_ppo_e0509_cfg():
         "n_timesteps": 100_000_000,
         
         "normalize_input": True,
-        "normalize_value": False,
+        "normalize_value": True,
         "clip_obs": 10.0,
     }
