@@ -33,8 +33,9 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--keep_all_info",
-    action="store_true",
-    default=False,
+    action="store_false",
+    dest="keep_all_info",
+    default=True,
     help="Use a slower SB3 wrapper but keep all the extra training info.",
 )
 parser.add_argument(
