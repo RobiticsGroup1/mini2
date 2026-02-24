@@ -14,8 +14,8 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.sim.spawners.lights import DomeLightCfg
 
 
-E0509_URDF = "/home/user/IsaacLab/doosan_isaaclab_sb3/asset/doosan_e0509/e0509_with_gripper.urdf"
-
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+E0509_URDF = os.path.join(_PROJECT_ROOT, "asset", "doosan_e0509", "e0509_with_gripper.urdf")
 
 @configclass
 class DoosanE0509SceneCfg(InteractiveSceneCfg):
