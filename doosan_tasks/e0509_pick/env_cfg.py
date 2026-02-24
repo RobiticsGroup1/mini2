@@ -14,8 +14,8 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.sim.spawners.lights import DomeLightCfg
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-E0509_URDF = os.path.join(_PROJECT_ROOT, "asset", "doosan_e0509", "e0509_with_gripper.urdf")
+E0509_URDF = "/home/user/IsaacLab/doosan_isaaclab_sb3/asset/doosan_e0509/e0509_with_gripper.urdf"
+
 
 @configclass
 class DoosanE0509SceneCfg(InteractiveSceneCfg):
@@ -39,13 +39,29 @@ class DoosanE0509SceneCfg(InteractiveSceneCfg):
 class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
     # Time/Episode settings
     decimation = 4
-    episode_length_s = 15.0 
+    episode_length_s = 20.0
 
     # Simulation settings
-    sim = sim_utils.SimulationCfg(dt=1.0 / 120.0, render_interval=decimation)
+    sim = sim_utils.SimulationCfg(
+        dt=1.0 / 120.0, 
+        render_interval=decimation,
+        device="cuda:0",
+        # Increase GPU buffer capacities for extreme high env counts (65k)
+        physx=sim_utils.PhysxCfg(
+            gpu_max_rigid_contact_count=2**24,      # Increased to 16M
+            gpu_max_rigid_patch_count=2**18,        # Increased to 256k
+            gpu_found_lost_aggregate_pairs_capacity=2**21,
+            gpu_found_lost_pairs_capacity=2**21,
+            gpu_total_aggregate_pairs_capacity=2**21,
+            gpu_max_soft_body_contacts=2**21,
+            gpu_max_particle_contacts=2**21,
+            gpu_heap_capacity=2**27,               # Increased to 128M
+            gpu_temp_buffer_capacity=2**25,        # Increased to 32M
+            gpu_max_num_partitions=8,
+        ),
+    )
 
     # Observation/Action dimensions
-    # q(10) + qd(10) + ee_pos(3) + snack_pos(3) + home_ee_pos(3) + ee_to_snack(3) + stage(1) + timer(1) = 34
     action_dim: int = 7
     obs_dim: int = 34  
 
@@ -64,6 +80,13 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
         default_factory=lambda: gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
         )
+    )
+
+    # Global Physics Material (Defined once, used everywhere)
+    snack_material = sim_utils.RigidBodyMaterialCfg(
+        static_friction=0.8,
+        dynamic_friction=0.8,
+        restitution=0.0,
     )
 
     # Robot configuration
@@ -97,8 +120,8 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
+                solver_position_iteration_count=4, 
+                solver_velocity_iteration_count=0, 
                 fix_root_link=True,
             ),
         ),
@@ -113,10 +136,10 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
                 "joint_4": 0.0,
                 "joint_5": 1.5708,
                 "joint_6": 0.0,
-                "rh_l1": 1.1,
-                "rh_l2": 1.1,
-                "rh_r1": 1.1,
-                "rh_r2": 1.1,
+                "rh_l1": 0.0,
+                "rh_l2": 0.0,
+                "rh_r1": 0.0,
+                "rh_r2": 0.0,
             }
         ),
         actuators={
@@ -143,16 +166,10 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
             prim_path="{ENV_REGEX_NS}/Desk",
             spawn=sim_utils.CuboidCfg(
                 size=(1.2, 0.6, 0.035),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.2, 0.4)), # Slate Blue
-                physics_material=sim_utils.RigidBodyMaterialCfg(),
-                collision_props=sim_utils.CollisionPropertiesCfg(
-                    collision_enabled=True,
-                    contact_offset=0.005,
-                    rest_offset=0.0
-                ),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    kinematic_enabled=True,
-                ),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.2, 0.4)),
+                physics_material=None,
+                collision_props=sim_utils.CollisionPropertiesCfg(), # Added collision
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             ),
             init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0175)),
         ),
@@ -160,16 +177,10 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
             prim_path="{ENV_REGEX_NS}/Stand",
             spawn=sim_utils.CuboidCfg(
                 size=(0.22, 0.18, 0.03),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.2)), # Dark Grey
-                physics_material=sim_utils.RigidBodyMaterialCfg(),
-                collision_props=sim_utils.CollisionPropertiesCfg(
-                    collision_enabled=True,
-                    contact_offset=0.005,
-                    rest_offset=0.0
-                ),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    kinematic_enabled=True,
-                ),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.2)),
+                physics_material=None,
+                collision_props=sim_utils.CollisionPropertiesCfg(), # Added collision
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             ),
             init_state=AssetBaseCfg.InitialStateCfg(pos=(-0.25, 0.0, 0.05)),
         ),
@@ -177,17 +188,11 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
             prim_path="{ENV_REGEX_NS}/Snack",
             spawn=sim_utils.CuboidCfg(
                 size=(0.08, 0.044, 0.048),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.733, 0.063)), # ffbb10
-                physics_material=sim_utils.RigidBodyMaterialCfg(),
-                collision_props=sim_utils.CollisionPropertiesCfg(
-                    collision_enabled=True,
-                    contact_offset=0.005,
-                    rest_offset=0.0
-                ),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.733, 0.063)),
+                physics_material=snack_material,
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.005),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False,
-                ),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(pos=(0.10, 0.0, 0.059)),
         ),
@@ -210,8 +215,8 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
     joint_vel_penalty_scale = 0.005
 
     # Thresholds
-    reach_success_dist = 0.025
+    reach_success_dist = 0.04
     home_success_dist = 0.05
 
     # Action properties
-    action_scale: float = 0.015
+    action_scale: float = 0.025

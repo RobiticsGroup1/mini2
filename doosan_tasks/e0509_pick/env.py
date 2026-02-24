@@ -55,6 +55,9 @@ class DoosanE0509PickEnv(DirectRLEnv):
         self.action_space = gym.spaces.Box(
             low=-1.0, high=1.0, shape=(self.cfg.action_dim,), dtype=float
         )
+        
+        # Initialize extras for logging
+        self.extras["log"] = dict()
 
     def _reset_idx(self, env_ids: torch.Tensor):
         super()._reset_idx(env_ids)
@@ -97,8 +100,8 @@ class DoosanE0509PickEnv(DirectRLEnv):
         # Arm delta control
         self.current_targets[:, self.arm_joint_ids] += self._actions[:, :6] * self.cfg.action_scale
         # Gripper absolute control [0, 1.1]
-        # Inverted mapping: 1.0 (Action) -> 0.0 (Closed), -1.0 (Action) -> 1.1 (Open)
-        gripper_pos = (1.0 - self._actions[:, 6:7]) / 2.0 * 1.1 
+        # Mapping: 1.0 (Action) -> 1.1 (Closed), -1.0 (Action) -> 0.0 (Open)
+        gripper_pos = (self._actions[:, 6:7] + 1.0) / 2.0 * 1.1 
         self.current_targets[:, self.gripper_joint_ids] = gripper_pos
         self.robot.set_joint_position_target(self.current_targets)
 
@@ -121,8 +124,15 @@ class DoosanE0509PickEnv(DirectRLEnv):
 
         ee_pos_l = self._get_ee_tip_pos_l()
         snack_pos_l = self.snack.data.root_pos_w[:, :3] - self.scene.env_origins
+        
+        # Snack dimensions from config
+        snack_height = self.cfg.scene.snack.spawn.size[2]
+        snack_top_pos_l = snack_pos_l.clone()
+        snack_top_pos_l[:, 2] += snack_height / 2.0
+        
         ee_quat_w = self.robot.data.body_quat_w[:, self.ee_body_id, :]
         
+        dist_ee_snack_top = torch.norm(ee_pos_l - snack_top_pos_l, dim=-1)
         dist_ee_snack = torch.norm(ee_pos_l - snack_pos_l, dim=-1)
         dist_ee_home = torch.norm(ee_pos_l - self.home_ee_pos_l, dim=-1)
         
@@ -135,15 +145,35 @@ class DoosanE0509PickEnv(DirectRLEnv):
         ee_z_axis = quat_rotate(ee_quat_w, torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1))
         align_dot = torch.clamp(torch.sum(ee_z_axis * down_vec, dim=-1), min=0.0)
 
+        # Velocities for "slow approach"
+        ee_vel_w = self.robot.data.body_lin_vel_w[:, self.ee_body_id, :]
+        ee_speed = torch.norm(ee_vel_w, dim=-1)
+
         rewards = torch.zeros(self.num_envs, device=self.device)
         
         # --- Stage 0: Approach ---
         stage_0_mask = (self.task_stage == 0)
+        # Reward distance to snack center (including Z alignment)
         rewards[stage_0_mask] = torch.exp(-20.0 * dist_ee_snack[stage_0_mask]) * self.cfg.reach_reward_scale
-        rewards[stage_0_mask] += align_dot[stage_0_mask] * 0.5
-        # NEW: Reward keeping gripper open (action near -1.0)
-        rewards[stage_0_mask] += -self._actions[stage_0_mask, 6] * 2.0
+        # Specifically reward Z-center alignment
+        z_diff = torch.abs(ee_pos_l[:, 2] - snack_pos_l[:, 2])
+        rewards[stage_0_mask] += torch.exp(-50.0 * z_diff[stage_0_mask]) * 5.0
         
+        # Alignment reward (watching down)
+        rewards[stage_0_mask] += align_dot[stage_0_mask] * 5.0
+        # Reward keeping gripper open (action near -1.0 is open)
+        rewards[stage_0_mask] += (1.0 - self._actions[stage_0_mask, 6]) * 2.0
+        
+        # Penalty for high speed during approach
+        rewards[stage_0_mask] -= torch.clamp(ee_speed[stage_0_mask] - 0.5, min=0.0) * 2.0
+        # Extra penalty for high speed when very close (slow approach)
+        near_snack = (dist_ee_snack < 0.1) & stage_0_mask
+        rewards[near_snack] -= torch.clamp(ee_speed[near_snack] - 0.1, min=0.0) * 10.0
+        
+        # Penalty for horizontal offset (encourage vertical approach)
+        horiz_dist = torch.norm(ee_pos_l[stage_0_mask, :2] - snack_pos_l[stage_0_mask, :2], dim=-1)
+        rewards[stage_0_mask] -= horiz_dist * 5.0
+
         reached_snack = (dist_ee_snack < self.cfg.reach_success_dist) & stage_0_mask
         self.task_stage[reached_snack] = 1
         self.stage_timer[reached_snack] = 0.0
@@ -154,6 +184,8 @@ class DoosanE0509PickEnv(DirectRLEnv):
         # Reward closing: action[6] pushed to 1.0 (Closed)
         rewards[stage_1_mask] = self._actions[stage_1_mask, 6] * self.cfg.grasp_reward_scale
         rewards[stage_1_mask] += torch.exp(-20.0 * dist_ee_snack[stage_1_mask]) * 5.0
+        # Maintain alignment
+        rewards[stage_1_mask] += align_dot[stage_1_mask] * 2.0
         
         # Transition condition: Wait 0.5s to ensure contact physics
         gripped = (self.stage_timer > 0.5) & (self._actions[:, 6] > 0.8) & stage_1_mask
@@ -165,14 +197,8 @@ class DoosanE0509PickEnv(DirectRLEnv):
         stage_2_mask = (self.task_stage == 2)
         # Reward vertical height specifically
         rewards[stage_2_mask] = (snack_pos_l[stage_2_mask, 2] - 0.059) * 100.0 
-        rewards[stage_2_mask] += torch.exp(-20.0 * dist_ee_snack[stage_2_mask]) * 10.0
         # Reward keeping gripper closed
-        rewards[stage_2_mask] += self._actions[stage_2_mask, 6] * 5.0
-        
-        # Penalty for horizontal dragging while low
-        drag_dist = torch.norm(snack_pos_l[stage_2_mask, :2] - torch.tensor([0.10, 0.0], device=self.device), dim=-1)
-        dragging = (snack_pos_l[stage_2_mask, 2] < 0.08) & (drag_dist > 0.02)
-        rewards[stage_2_mask] -= dragging.float() * 20.0
+        rewards[stage_2_mask] += self._actions[stage_2_mask, 6] * 10.0
         
         # Transition: Lifted to 0.12m
         is_lifted = (snack_pos_l[:, 2] > 0.12) & stage_2_mask
@@ -183,14 +209,13 @@ class DoosanE0509PickEnv(DirectRLEnv):
         stage_3_mask = (self.task_stage == 3)
         rewards[stage_3_mask] = (1.0 - torch.tanh(dist_ee_home[stage_3_mask] / 0.2)) * self.cfg.home_reward_scale
         rewards[stage_3_mask] += (1.0 - torch.tanh(dist_joint_home[stage_3_mask] / 0.5)) * 10.0
-        rewards[stage_3_mask] += torch.exp(-20.0 * dist_ee_snack[stage_3_mask]) * 10.0 # KEEP GRIP
-        rewards[stage_3_mask] += self._actions[stage_3_mask, 6] * 5.0 # KEEP GRIPPER CLOSED
+        # Penalty if snack dropped
+        dropped_mask = snack_pos_l[stage_3_mask, 2] < 0.08
+        rewards[stage_3_mask] -= dropped_mask.float() * 100.0
+        # Strong reward keeping gripper closed
+        rewards[stage_3_mask] += self._actions[stage_3_mask, 6] * 20.0
         
-        # Strong penalty for dragging/dropping
-        dropped = (snack_pos_l[stage_3_mask, 2] < 0.08)
-        rewards[stage_3_mask] -= dropped.float() * 50.0
-        
-        # Transition: Reached home (Position AND Pose)
+        # Transition: Reached home
         reached_home = (dist_ee_home < self.cfg.home_success_dist) & \
                        (dist_joint_home < 0.15) & \
                        (snack_pos_l[:, 2] > 0.10) & stage_3_mask
@@ -200,21 +225,22 @@ class DoosanE0509PickEnv(DirectRLEnv):
         # --- Stage 4: Hold ---
         stage_4_mask = (self.task_stage == 4)
         rewards[stage_4_mask] = self.cfg.home_reward_scale 
-        rewards[stage_4_mask] += (1.0 - torch.tanh(dist_joint_home[stage_4_mask] / 0.2)) * 15.0
-        rewards[stage_4_mask] += torch.exp(-20.0 * dist_ee_snack[stage_4_mask]) * 10.0
-        rewards[stage_4_mask] += self._actions[stage_4_mask, 6] * 5.0 # KEEP GRIPPER CLOSED
+        rewards[stage_4_mask] += self._actions[stage_4_mask, 6] * 20.0
         
-        # Strong drop penalty
-        dropped_penalty = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05)).float() * 100.0
+        # Strong drop penalty for all pick stages
+        dropped_penalty = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05)).float() * 200.0
         
         # Action/Vel penalties
         r_act = -torch.sum(torch.square(self._actions), dim=-1) * self.cfg.action_penalty_scale
         r_vel = -torch.sum(torch.square(self.robot.data.joint_vel), dim=-1) * self.cfg.joint_vel_penalty_scale
+
+        # Log success rate: Stage 4 (Hold) 진입 후 3초 유지 = 성공
+        self.extras["log"]["success_rate"] = ((self.task_stage == 4) & (self.stage_timer > 1.0)).float()
         
         return rewards + r_act + r_vel - dropped_penalty
     
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         truncated = self.episode_length_buf >= self.max_episode_length - 1
-        success = (self.task_stage == 4) & (self.stage_timer > 3.0)
+        success = (self.task_stage == 4) & (self.stage_timer > 1.0)
         terminated = success
         return terminated, truncated
