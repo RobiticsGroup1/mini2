@@ -158,8 +158,8 @@ class DoosanE0509PickEnv(DirectRLEnv):
 
         # Alignment reward (gripper pointing down)
         rewards[stage_0_mask] += align_dot[stage_0_mask] * 5.0
-        # Reward keeping gripper open (action near -1.0 is open)
-        rewards[stage_0_mask] += (1.0 - self._actions[stage_0_mask, 6]) * 2.0
+        # Strongly penalize closed gripper during approach
+        rewards[stage_0_mask] -= torch.clamp(self._actions[stage_0_mask, 6], min=0.0) * 15.0
 
         # Penalty for high speed during approach
         rewards[stage_0_mask] -= torch.clamp(ee_speed[stage_0_mask] - 0.5, min=0.0) * 2.0
