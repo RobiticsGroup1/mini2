@@ -29,6 +29,13 @@ class DoosanE0509SceneCfg(InteractiveSceneCfg):
     desk: AssetBaseCfg = None
     stand: AssetBaseCfg = None
     snack: RigidObjectCfg = None
+    
+    # Basket components (to make it open)
+    basket_bottom: AssetBaseCfg = None
+    basket_wall_nx: AssetBaseCfg = None
+    basket_wall_px: AssetBaseCfg = None
+    basket_wall_ny: AssetBaseCfg = None
+    basket_wall_py: AssetBaseCfg = None
 
     # lights
     dome_light: AssetBaseCfg = AssetBaseCfg(
@@ -46,6 +53,15 @@ class DoosanE0509ReachEnvCfg(DirectRLEnvCfg):
     # 기본 타임/에피소드
     decimation = 4
     episode_length_s = 10.0
+
+    # Basket tuning parameters
+    # Desk size: (1.2, 0.6, 0.035), pos: (0.0, 0.0, 0.0175) -> Top Z = 0.035
+    # Basket size: (0.6, 0.3, 0.5)
+    # To align tops: Basket Z center = Top Z - (height / 2) = 0.035 - 0.25 = -0.215
+    # To attach on side: Desk extent Y is +/- 0.3. Basket half-width is 0.15.
+    # Center Y = -0.3 - 0.15 = -0.45 (Right side)
+    basket_size = (0.6, 0.3, 0.5)
+    basket_pos = (0.0, -0.45, -0.215) 
 
     # 시뮬레이션
     sim = sim_utils.SimulationCfg(dt=1.0 / 120.0, render_interval=decimation)
@@ -80,11 +96,17 @@ class DoosanE0509ReachEnvCfg(DirectRLEnvCfg):
             fix_base=True,
             make_instanceable=True,
             merge_fixed_joints=True,
-            force_usd_conversion=True, # ✅ Force refresh to apply new colors
+            force_usd_conversion=True, 
             collision_from_visuals=True, 
             collider_type="convex_hull",
             self_collision=True,
-            joint_drive=None,
+            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                target_type="position",
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                    stiffness=800.0,
+                    damping=80.0,
+                ),
+            ),
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -122,12 +144,12 @@ class DoosanE0509ReachEnvCfg(DirectRLEnvCfg):
         actuators={
             "arm": ImplicitActuatorCfg(
                 joint_names_expr=["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"],
-                stiffness=200.0,
-                damping=40.0,
+                stiffness=800.0,
+                damping=80.0,
             ),
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["rh_.*"],
-                stiffness=200.0,
+                stiffness=400.0,
                 damping=40.0,
             ),
         },
@@ -189,13 +211,92 @@ class DoosanE0509ReachEnvCfg(DirectRLEnvCfg):
                     disable_gravity=False,
                 ),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.15, 0.0, 0.047)),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.10, 0.0, 0.047)),
+        ),
+        # Basket - Composed of 5 walls to make it "open"
+        basket_bottom=AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/BasketBottom",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.6, 0.3, 0.02),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.3, 0.1)),
+                physics_material=sim_utils.RigidBodyMaterialCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -0.45, 0.035 - 0.5 + 0.02/2)),
+        ),
+        basket_wall_nx=AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/BasketWallNX",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.02, 0.3, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.3, 0.1)),
+                physics_material=sim_utils.RigidBodyMaterialCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(-0.3 + 0.02/2, -0.45, 0.035 - 0.25)),
+        ),
+        basket_wall_px=AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/BasketWallPX",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.02, 0.3, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.3, 0.1)),
+                physics_material=sim_utils.RigidBodyMaterialCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.3 - 0.02/2, -0.45, 0.035 - 0.25)),
+        ),
+        basket_wall_ny=AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/BasketWallNY",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.6, 0.02, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.3, 0.1)),
+                physics_material=sim_utils.RigidBodyMaterialCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -0.45 - 0.15 + 0.02/2, 0.035 - 0.25)),
+        ),
+        basket_wall_py=AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/BasketWallPY",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.6, 0.02, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.3, 0.1)),
+                physics_material=sim_utils.RigidBodyMaterialCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -0.45 + 0.15 - 0.02/2, 0.035 - 0.25)),
         ),
     )
 
     ee_link_name: str = "link_6"
-    target_min = (-0.3, -0.3, 0.2)
-    target_max = (0.5, 0.3, 0.6)
+    
+    # target bounds (fixed on the desk based on stand position)
+    target_min = (0.10, 0.0, 0.047)
+    target_max = (0.10, 0.0, 0.047)
+    
+    # reward scales (Perception + Pick)
+    detect_reward_scale = 1.0
+    reach_reward_scale = 2.0
+    align_reward_scale = 1.0
+    preshape_reward_scale = 0.5
+    grasp_reward_scale = 4.0
+    lift_reward_scale = 6.0
+    place_reward_scale = 0.0
+
+    action_penalty_scale = 0.02
+    joint_vel_penalty_scale = 0.001
+    collision_penalty_scale = 2.0
+
+    # thresholds
+    reach_success_dist = 0.04
+    grasp_success_dist = 0.03
+    lift_height_target = 0.10
+    conf_threshold = 0.5
+
+    # legacy weights
     success_dist: float = 0.04
     w_dist: float = 1.0
     w_action: float = 0.01

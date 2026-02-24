@@ -106,11 +106,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # E0509 추가
 # ---------------
 import doosan_tasks
-
-# debug
-
-
-from doosan_tasks.e0509_reach.agents import sb3_ppo_e0509_cfg
+import importlib
 
 
 # import logger
@@ -128,7 +124,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ---------------
     # E0509 추가
     # ---------------
-    agent_cfg = sb3_ppo_e0509_cfg()
+    # Get agent config from task spec if not provided by hydra or to override
+    spec = gym.spec(args_cli.task)
+    if hasattr(spec, "kwargs") and "sb3_cfg_entry_point" in spec.kwargs:
+        entry_point = spec.kwargs["sb3_cfg_entry_point"]
+        module_name, func_name = entry_point.split(":")
+        module = importlib.import_module(module_name)
+        agent_cfg = getattr(module, func_name)()
+    elif hasattr(spec, "_kwargs") and "sb3_cfg_entry_point" in spec._kwargs:
+        entry_point = spec._kwargs["sb3_cfg_entry_point"]
+        module_name, func_name = entry_point.split(":")
+        module = importlib.import_module(module_name)
+        agent_cfg = getattr(module, func_name)()
+    else:
+        # Fallback for old tasks or if not found
+        from doosan_tasks.e0509_reach.agents import sb3_ppo_e0509_cfg
+        agent_cfg = sb3_ppo_e0509_cfg()
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
