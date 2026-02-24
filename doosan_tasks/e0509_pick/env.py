@@ -238,5 +238,10 @@ class DoosanE0509PickEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         success = (self.task_stage == 4) & (self.stage_timer > 1.0)
-        terminated = success
+
+        # drop 조건: pick 이후(stage>=2) 물체가 바닥 가까이로 떨어지면 종료
+        snack_pos_l = self.snack.data.root_pos_w[:, :3] - self.scene.env_origins
+        drop = (self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05)   # threshold는 상황에 맞게 0.04~0.08 조정
+
+        terminated = success | drop
         return terminated, truncated
