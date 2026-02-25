@@ -1,0 +1,47 @@
+================================================================================
+PROJECT: Doosan E0509 Pick & Place Task Redesign (Manager-based)
+================================================================================
+
+1. REPOSITORY OVERVIEW
+   - Target Repo: RobiticsGroup1/mini2
+   - Current Task: 'e0509_pick' (Picking and placing objects)
+   - Current Implementation: DirectRLEnv (Monolithic approach)
+
+2. CORE OBJECTIVE
+   - Fully transition from DirectRLEnv to the Manager-based RLEnv (Isaac Lab standard).
+   - Aim for modularity, scalability, and cleaner reward/observation management.
+
+3. ARCHITECTURAL DESIGN (Manager-based)
+
+   A. Scene Configuration (SceneCfg)
+      - Asset: Doosan E0509 (URDF/Mesh from repo)
+      - Object: Manipulation target (Cube/Box)
+      - Ground Plane & Table setup
+      - Sensors: Contact sensors for gripper pads, Frame markers for EE/Object
+
+   B. Observation Manager (ObsManager)
+      - Robot State: Joint positions, velocities, and EE pose.
+      - Task State: Object pose, relative distance/orientation between EE and Object.
+      - History: Previous actions for temporal context.
+
+   C. Reward Manager (RewManager)
+      - Approach Term: Penalty/Reward based on distance to object.
+      - Grasp Term: Binary/Continuous reward for successful contact & grip.
+      - Lift Term: Reward for increasing Z-height of the object.
+      - Goal Term: Reward for matching object pose with target pose.
+      - Regularization: Penalties for high joint torque or sudden movements.
+
+   D. Termination Manager (TermManager)
+      - Success: Object reached target within threshold.
+      - Failure: Object fell off table, self-collision, or timeout.
+
+   E. Event Manager
+      - Randomization: Randomized spawning for robot joints and object pose.
+
+4. NEXT ACTION STEPS for Gemini CLI
+   - Step 1: Generate 'e0509_pick_env_cfg.py' skeleton (ManagerBasedRLEnvCfg).
+   - Step 2: Define specialized reward functions in a separate 'rewards.py'.
+   - Step 3: Configure Action Manager for Inverse Kinematics (IK) control.
+   - Step 4: Update training script to register and run the new v2 environment.
+
+================================================================================
