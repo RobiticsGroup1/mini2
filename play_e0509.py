@@ -9,9 +9,6 @@
 
 import argparse
 import sys
-import os
-import random
-import time
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -20,6 +17,9 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from Stable-Baselines3.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -27,6 +27,11 @@ parser.add_argument(
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--use_pretrained_checkpoint",
+    action="store_true",
+    help="Use the pre-trained checkpoint from Nucleus.",
+)
 parser.add_argument(
     "--use_last_checkpoint",
     action="store_true",
@@ -56,10 +61,14 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import os
+import random
+import time
+import importlib
+
 import gymnasium as gym
 import torch
 import numpy as np
-
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
@@ -71,7 +80,9 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
+
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
+from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -81,7 +92,7 @@ from isaaclab_tasks.utils.parse_cfg import get_checkpoint_path
 # E0509 추가
 # ---------------
 import doosan_tasks
-import importlib
+
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
@@ -89,15 +100,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
-    
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
 
     # ---------------
-    # E0509 추가
+    # E0509 추가 (Custom Agent Config Handling)
     # ---------------
-    # Get agent config from task spec if not provided by hydra or to override
     spec = gym.spec(args_cli.task)
     if hasattr(spec, "kwargs") and "sb3_cfg_entry_point" in spec.kwargs:
         entry_point = spec.kwargs["sb3_cfg_entry_point"]
@@ -109,23 +118,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         module_name, func_name = entry_point.split(":")
         module = importlib.import_module(module_name)
         agent_cfg = getattr(module, func_name)()
-    else:
-        # Fallback for old tasks or if not found
-        from doosan_tasks.e0509_reach.agents import sb3_ppo_e0509_cfg
-        agent_cfg = sb3_ppo_e0509_cfg()
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["seed"]
+    
+    # ---------------
+    # E0509 추가 (Reduce PhysX buffers for playback to save VRAM)
+    # ---------------
+    if hasattr(env_cfg, "sim") and hasattr(env_cfg.sim, "physx"):
+        env_cfg.sim.physx.gpu_max_rigid_contact_count = 2**20
+        env_cfg.sim.physx.gpu_max_rigid_patch_count = 2**16
+        env_cfg.sim.physx.gpu_heap_capacity = 2**24
+        env_cfg.sim.physx.gpu_temp_buffer_capacity = 2**22
+
     # set the environment seed
+    # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     # directory for logging into
-    log_root_path = os.path.abspath(os.path.join("logs", "sb3", train_task_name))
-    
-    # checkpoint path
-    if args_cli.checkpoint is None:
+    log_root_path = os.path.join("logs", "sb3", train_task_name)
+    log_root_path = os.path.abspath(log_root_path)
+    # checkpoint and log_dir stuff
+    if args_cli.use_pretrained_checkpoint:
+        checkpoint_path = get_published_pretrained_checkpoint("sb3", train_task_name)
+        if not checkpoint_path:
+            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
+            return
+    elif args_cli.checkpoint is None:
         if args_cli.use_last_checkpoint:
             checkpoint = "model_.*.zip"
         else:
@@ -133,9 +154,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         checkpoint_path = get_checkpoint_path(log_root_path, ".*", checkpoint, sort_alpha=False)
     else:
         checkpoint_path = args_cli.checkpoint
+    
+    if checkpoint_path is None:
+        print(f"[ERROR] No checkpoint found in: {log_root_path}")
+        return
+
     log_dir = os.path.dirname(checkpoint_path)
 
-    # set the log directory for the environment
+    # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
     # create isaac environment
@@ -144,7 +170,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # post-process agent configuration
     agent_cfg = process_sb3_cfg(agent_cfg, env.unwrapped.num_envs)
 
-    # convert to single-agent instance if required
+    # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
@@ -157,8 +183,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "disable_logger": True,
         }
         print("[INFO] Recording videos.")
+        print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
-        
     # wrap around environment for stable baselines
     env = Sb3VecEnvWrapper(env, fast_variant=not args_cli.keep_all_info)
 
@@ -168,14 +194,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # normalize environment (if needed)
     if vec_norm_path.exists():
         print(f"Loading saved normalization: {vec_norm_path}")
-        env = VecNormalize.load(str(vec_norm_path), env)
+        env = VecNormalize.load(vec_norm_path, env)
+        #  do not update them at test time
         env.training = False
+        # reward normalization is not needed at test time
         env.norm_reward = False
-    elif agent_cfg.get("normalize_input"):
+    elif "normalize_input" in agent_cfg and agent_cfg["normalize_input"]:
         env = VecNormalize(
             env,
-            training=True,
-            norm_obs=agent_cfg.get("normalize_input", True),
+            training=False,
+            norm_obs=True,
             clip_obs=agent_cfg.get("clip_obs", 10.0),
         )
 
@@ -197,9 +225,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions, _ = agent.predict(obs, deterministic=True)
             # env stepping
             obs, _, _, _ = env.step(actions)
-        
         if args_cli.video:
             timestep += 1
+            # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
 
@@ -211,6 +239,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # close the simulator
     env.close()
 
+
 if __name__ == "__main__":
+    # run the main function
     main()
+    # close sim app
     simulation_app.close()

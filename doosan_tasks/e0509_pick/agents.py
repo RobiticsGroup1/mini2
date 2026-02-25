@@ -12,7 +12,7 @@ def sb3_ppo_e0509_cfg():
         "ent_coef": 0.0,
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
-        "n_timesteps": 100_000_000,
+        "n_timesteps": 50_000_000,
         
         "normalize_input": True,
         "normalize_value": False,
