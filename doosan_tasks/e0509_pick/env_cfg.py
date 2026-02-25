@@ -202,7 +202,7 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
     ee_offset = (0.0, 0.0, 0.13)
     
     # Reward scales
-    reach_reward_scale = 5.0
+    reach_reward_scale = 20.0
     grasp_reward_scale = 10.0
     lift_reward_scale = 100.0
     home_reward_scale = 20.0

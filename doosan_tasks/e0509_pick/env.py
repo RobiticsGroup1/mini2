@@ -210,17 +210,12 @@ class DoosanE0509PickEnv(DirectRLEnv):
         )
 
         # --- Stage 0: Approach ---
-        rewards[stage_0_mask] = torch.exp(-20.0 * dist_ee_snack[stage_0_mask]) * self.cfg.reach_reward_scale
+        # exp(-4 * dist): 시작 거리(~0.35m)에서도 0.25의 gradient가 존재
+        # 기존 exp(-20 * dist)는 0.35m에서 0.001로 사실상 gradient 없음
+        rewards[stage_0_mask] = torch.exp(-4.0 * dist_ee_snack[stage_0_mask]) * self.cfg.reach_reward_scale
 
-        # Specifically reward Z-center alignment
-        z_diff = torch.abs(ee_pos_l[:, 2] - snack_pos_l[:, 2])
-        rewards[stage_0_mask] += torch.exp(-50.0 * z_diff[stage_0_mask]) * 5.0
-
-        # Alignment reward
-        rewards[stage_0_mask] += align_dot[stage_0_mask] * 5.0
-
-        # Reward keeping gripper open (action near -1.0 is open) - now mostly constant due to gating
-        rewards[stage_0_mask] += (1.0 - self._actions[stage_0_mask, 6]) * 2.0
+        # Alignment reward (그리퍼가 아래를 향하도록, 최종 접근 자세 유도)
+        rewards[stage_0_mask] += align_dot[stage_0_mask] * 2.0
 
         # Penalty for high speed during approach
         rewards[stage_0_mask] -= torch.clamp(ee_speed[stage_0_mask] - 0.5, min=0.0) * 2.0
@@ -228,9 +223,9 @@ class DoosanE0509PickEnv(DirectRLEnv):
         near_snack = (dist_ee_snack < 0.1) & stage_0_mask
         rewards[near_snack] -= torch.clamp(ee_speed[near_snack] - 0.1, min=0.0) * 10.0
 
-        # Penalty for horizontal offset (encourage vertical approach)
+        # Penalty for horizontal offset (수직 접근 유도, 3D distance와 겹치므로 약하게)
         horiz_dist = torch.norm(ee_pos_l[stage_0_mask, :2] - snack_pos_l[stage_0_mask, :2], dim=-1)
-        rewards[stage_0_mask] -= horiz_dist * 5.0
+        rewards[stage_0_mask] -= horiz_dist * 2.0
 
         # --- Stage 1: Grip ---
         rewards[stage_1_mask] = self._actions[stage_1_mask, 6] * self.cfg.grasp_reward_scale
