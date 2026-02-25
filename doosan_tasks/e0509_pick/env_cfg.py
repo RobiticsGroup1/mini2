@@ -190,7 +190,7 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
                 size=(0.08, 0.044, 0.048),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.733, 0.063)),
                 physics_material=snack_material,
-                mass_props=sim_utils.MassPropertiesCfg(mass=0.005),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             ),

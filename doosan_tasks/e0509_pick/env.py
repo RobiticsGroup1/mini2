@@ -161,120 +161,103 @@ class DoosanE0509PickEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         self.stage_timer += self.cfg.sim.dt * self.cfg.decimation
+        eps = 1e-8 # NaN 방지를 위한 미소값
 
+        # 1. 좌표 및 상태 업데이트 (벡터화 유지)
         ee_pos_l = self._get_ee_tip_pos_l()
         snack_pos_l = self.snack.data.root_pos_w[:, :3] - self.scene.env_origins
-
         ee_quat_w = self.robot.data.body_quat_w[:, self.ee_body_id, :]
 
-        dist_ee_snack = torch.norm(ee_pos_l - snack_pos_l, dim=-1)
-        dist_ee_home = torch.norm(ee_pos_l - self.home_ee_pos_l, dim=-1)
+        # 거리 계산 (eps 추가로 NaN 방지)
+        dist_ee_snack = torch.norm(ee_pos_l - snack_pos_l, dim=-1) + eps
+        dist_ee_home = torch.norm(ee_pos_l - self.home_ee_pos_l, dim=-1) + eps
 
-        # Joint distance to home (arm joints only)
         arm_q = self.robot.data.joint_pos[:, self.arm_joint_ids]
-        dist_joint_home = torch.norm(arm_q - self.default_arm_q, dim=-1)
+        dist_joint_home = torch.norm(arm_q - self.default_arm_q, dim=-1) + eps
 
-        # Orientation: Gripper pointing down
+        # 그리퍼 방향 (아래를 향하도록)
         down_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         ee_z_axis = quat_rotate(
             ee_quat_w,
             torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1),
         )
-        align_dot = torch.clamp(torch.sum(ee_z_axis * down_vec, dim=-1), min=0.0)
+        align_dot = torch.clamp(torch.sum(ee_z_axis * down_vec, dim=-1), min=0.0, max=1.0)
 
-        # Velocities for "slow approach"
+        # 속도 제어
         ee_vel_w = self.robot.data.body_lin_vel_w[:, self.ee_body_id, :]
         ee_speed = torch.norm(ee_vel_w, dim=-1)
 
-        # Gripper state
+        # 그리퍼 상태
         gripper_q = self.robot.data.joint_pos[:, self.gripper_joint_ids]
-        gripper_closed = gripper_q.mean(dim=-1) > 0.7
+        gripper_closed = gripper_q.mean(dim=-1) > 0.7 
 
         rewards = torch.zeros(self.num_envs, device=self.device)
 
-        # ── 전환 조건을 현재 stage 기준으로 미리 계산 (아직 task_stage 변경 안 함) ──
-        stage_0_mask = (self.task_stage == 0)
-        stage_1_mask = (self.task_stage == 1)
-        stage_2_mask = (self.task_stage == 2)
-        stage_3_mask = (self.task_stage == 3)
-        stage_4_mask = (self.task_stage == 4)
-
-        reached_snack = (dist_ee_snack < self.cfg.reach_success_dist) & stage_0_mask
-        gripped = (self.stage_timer > 0.5) & gripper_closed & stage_1_mask
-        is_lifted = (snack_pos_l[:, 2] > 0.12) & stage_2_mask
-        reached_home = (
-            (dist_ee_home < self.cfg.home_success_dist)
-            & (dist_joint_home < 0.15)
-            & (snack_pos_l[:, 2] > 0.10)
-            & stage_3_mask
-        )
+        # 마스크 설정
+        stage_masks = [self.task_stage == i for i in range(5)]
 
         # --- Stage 0: Approach ---
-        # exp(-4 * dist): 시작 거리(~0.35m)에서도 0.25의 gradient가 존재
-        # 기존 exp(-20 * dist)는 0.35m에서 0.001로 사실상 gradient 없음
-        rewards[stage_0_mask] = torch.exp(-4.0 * dist_ee_snack[stage_0_mask]) * self.cfg.reach_reward_scale
+        # 수평 거리를 더 엄격하게 벌점 주어 위에서 아래로 접근하게 유도
+        horiz_dist = torch.norm(ee_pos_l[:, :2] - snack_pos_l[:, :2], dim=-1)
+        rewards[stage_masks[0]] = torch.exp(-5.0 * dist_ee_snack[stage_masks[0]]) * self.cfg.reach_reward_scale
+        rewards[stage_masks[0]] += align_dot[stage_masks[0]] * 5.0
+        rewards[stage_masks[0]] -= horiz_dist[stage_masks[0]] * 3.0 # 수평 오차 벌점 강화
 
-        # Alignment reward (그리퍼가 아래를 향하도록, 최종 접근 자세 유도)
-        rewards[stage_0_mask] += align_dot[stage_0_mask] * 2.0
+        # --- Stage 1: Grip (강화됨) ---
+        # 단순히 닫는 명령뿐 아니라, 닫았을 때 물체와 손의 거리가 가까워야 보상
+        grip_command = self._actions[:, 6]
+        rewards[stage_masks[1]] = grip_command[stage_masks[1]] * self.cfg.grasp_reward_scale
+        rewards[stage_masks[1]] += (dist_ee_snack[stage_masks[1]] < 0.05).float() * 10.0 # 근접 보너스
 
-        # Penalty for high speed during approach
-        rewards[stage_0_mask] -= torch.clamp(ee_speed[stage_0_mask] - 0.5, min=0.0) * 2.0
-        # Extra penalty for high speed when very close
-        near_snack = (dist_ee_snack < 0.1) & stage_0_mask
-        rewards[near_snack] -= torch.clamp(ee_speed[near_snack] - 0.1, min=0.0) * 10.0
-
-        # Penalty for horizontal offset (수직 접근 유도, 3D distance와 겹치므로 약하게)
-        horiz_dist = torch.norm(ee_pos_l[stage_0_mask, :2] - snack_pos_l[stage_0_mask, :2], dim=-1)
-        rewards[stage_0_mask] -= horiz_dist * 2.0
-
-        # --- Stage 1: Grip ---
-        rewards[stage_1_mask] = self._actions[stage_1_mask, 6] * self.cfg.grasp_reward_scale
-        rewards[stage_1_mask] += torch.exp(-20.0 * dist_ee_snack[stage_1_mask]) * 5.0
-        rewards[stage_1_mask] += align_dot[stage_1_mask] * 2.0
-
-        # --- Stage 2: Lift ---
-        rewards[stage_2_mask] = torch.clamp(snack_pos_l[stage_2_mask, 2] - 0.059, min=0.0) * self.cfg.lift_reward_scale
-        rewards[stage_2_mask] += self._actions[stage_2_mask, 6] * 10.0
+        # --- Stage 2: Lift (강화됨) ---
+        # 물체가 들렸더라도 손에서 멀어지면(튕겨나가면) 보상 삭제
+        is_holding = dist_ee_snack < 0.08
+        lift_height = torch.clamp(snack_pos_l[:, 2] - 0.059, min=0.0)
+        rewards[stage_masks[2]] = lift_height[stage_masks[2]] * self.cfg.lift_reward_scale * is_holding[stage_masks[2]].float()
+        rewards[stage_masks[2]] -= (~is_holding[stage_masks[2]]).float() * 20.0 # 놓치면 벌점
 
         # --- Stage 3: Return Home ---
-        rewards[stage_3_mask] = (1.0 - torch.tanh(dist_ee_home[stage_3_mask] / 0.2)) * self.cfg.home_reward_scale
-        rewards[stage_3_mask] += (1.0 - torch.tanh(dist_joint_home[stage_3_mask] / 0.5)) * 10.0
-        rewards[stage_3_mask] += self._actions[stage_3_mask, 6] * 20.0  # keep closed
+        # 물체를 유지한 채로 복귀할 때만 높은 보상
+        rewards[stage_masks[3]] = (1.0 - torch.tanh(dist_ee_home[stage_masks[3]] / 0.3)) * self.cfg.home_reward_scale
+        rewards[stage_masks[3]] += is_holding[stage_masks[3]].float() * 20.0 # 유지 보상
 
-        # --- Stage 4: Release (open gripper at home) ---
-        rewards[stage_4_mask] = self.cfg.home_reward_scale * 0.5
-        open_score = (1.0 - self._actions[stage_4_mask, 6]) * 0.5  # open=1, close=0
-        rewards[stage_4_mask] += open_score * 10.0
+        # --- Stage 4: Release ---
+        rewards[stage_masks[4]] = self.cfg.home_reward_scale
+        open_score = (1.0 - grip_command[stage_masks[4]]) # 1에 가까울수록 잘 연 것
+        rewards[stage_masks[4]] += open_score * 15.0
 
-        # ── 모든 stage 보상 적용 후 전환 실행 + 보너스 추가 ──
-        # 이 시점에 += 하므로 위의 = 할당에 덮어써지지 않음
+        # ── 전환 로직 (안전 장치 추가) ──
+        # 0 -> 1: 충분히 접근했을 때
+        reached_snack = (dist_ee_snack < self.cfg.reach_success_dist) & stage_masks[0]
         self.task_stage[reached_snack] = 1
         self.stage_timer[reached_snack] = 0.0
         rewards[reached_snack] += self.cfg.grasp_success_reward
 
+        # 1 -> 2: 닫기 시작한 후 약간의 시간 대기 (물리 안정화)
+        gripped = (self.stage_timer > 0.3) & gripper_closed & stage_masks[1]
         self.task_stage[gripped] = 2
         self.stage_timer[gripped] = 0.0
         rewards[gripped] += self.cfg.lift_success_reward
 
+        # 2 -> 3: 실제로 물체가 들렸고 + 여전히 손에 있을 때만 전환
+        is_lifted = (snack_pos_l[:, 2] > 0.15) & is_holding & stage_masks[2]
         self.task_stage[is_lifted] = 3
         self.stage_timer[is_lifted] = 0.0
 
+        # 3 -> 4: 홈 포지션 근처 도달
+        reached_home = (dist_ee_home < self.cfg.home_success_dist) & stage_masks[3]
         self.task_stage[reached_home] = 4
         self.stage_timer[reached_home] = 0.0
 
-        # Drop penalty
-        drop = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05))
-        rewards[drop] -= 50.0
+        # 공통 벌점 (추락 및 행동 제약)
+        drop = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.06))
+        rewards[drop] -= 100.0 # 추락 벌점 강화
 
-        # Action/Vel penalties
-        a = self._actions.clone()
-        a[:, 6] = 0.0  # do not penalize gripper command (we gate it by stage)
-        r_act = -torch.sum(torch.square(a), dim=-1) * self.cfg.action_penalty_scale
+        r_act = -torch.sum(torch.square(self._actions), dim=-1) * self.cfg.action_penalty_scale
         r_vel = -torch.sum(torch.square(self.robot.data.joint_vel), dim=-1) * self.cfg.joint_vel_penalty_scale
 
-        # Log success rate (scalar): Stage 4 + gripper actually open + held for a bit
-        gripper_open = gripper_q.mean(dim=-1) < 0.2
-        success = ((self.task_stage == 4) & (self.stage_timer > 0.5) & gripper_open).float()
+        # 성공 판정 로그
+        success = ((self.task_stage == 4) & (self.stage_timer > 0.5)).float()
         self.extras["log"]["success_rate"] = success.mean()
 
         return rewards + r_act + r_vel
