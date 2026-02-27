@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 
 import isaaclab.sim as sim_utils
 import isaaclab.envs.mdp as mdp
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -13,57 +15,45 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as TermTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.envs.mdp.actions.actions_cfg import RelativeJointPositionActionCfg, JointPositionActionCfg
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
-from . import rewards as custom_rewards
+from . import rewards
+from . import observations
 
+##
+# Path to Robot URDF
+##
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 E0509_URDF = os.path.join(_PROJECT_ROOT, "asset", "doosan_e0509", "e0509_with_gripper.urdf")
 
 @configclass
 class DoosanE0509SceneCfg(InteractiveSceneCfg):
-    # Assets
+    """Configuration for the scene."""
+    
+    # Ground plane
+    ground_plane = AssetBaseCfg(
+        prim_path="/World/ground",
+        spawn=sim_utils.GroundPlaneCfg(),
+    )
+
+    # Robot
     robot: ArticulationCfg = ArticulationCfg(
-        prim_path="{ENV_REGEX_NS}/e0509",
+        prim_path="{ENV_REGEX_NS}/Robot",
         spawn=sim_utils.UrdfFileCfg(
             asset_path=E0509_URDF,
             fix_base=True,
             make_instanceable=True,
-            merge_fixed_joints=True,
-            force_usd_conversion=True, 
-            collision_from_visuals=True, 
-            collider_type="convex_hull",
             self_collision=True,
+            activate_contact_sensors=True,
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 target_type="position",
-                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=5000.0,
-                    damping=800.0,
-                ),
-            ),
-            activate_contact_sensors=True,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                max_depenetration_velocity=1.0,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True,
-                contact_offset=0.005,
-                rest_offset=0.0
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
-                fix_root_link=True,
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=5000.0, damping=500.0),
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-0.25, 0.0, 0.066), 
-            rot=(1.0, 0.0, 0.0, 0.0),
+            pos=(-0.25, 0.0, 0.066),
             joint_pos={
                 "joint_1": 0.0,
                 "joint_2": 0.0,
@@ -91,212 +81,197 @@ class DoosanE0509SceneCfg(InteractiveSceneCfg):
         },
     )
 
-    desk: AssetBaseCfg = AssetBaseCfg(
+    # Contact Sensor
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        history_length=3,
+        track_air_time=False,
+    )
+
+    # Desk
+    desk = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Desk",
         spawn=sim_utils.CuboidCfg(
             size=(1.2, 0.6, 0.035),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.2, 0.4)),
-            physics_material=sim_utils.RigidBodyMaterialCfg(),
-            physics_material_path="/World/Materials/DeskMaterial",
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            activate_contact_sensors=True,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0175)),
     )
 
-    stand: AssetBaseCfg = AssetBaseCfg(
+    # Stand
+    stand = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Stand",
         spawn=sim_utils.CuboidCfg(
             size=(0.22, 0.18, 0.03),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.2)),
-            physics_material=sim_utils.RigidBodyMaterialCfg(),
-            physics_material_path="/World/Materials/StandMaterial",
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(-0.25, 0.0, 0.05)),
     )
 
-    snack: RigidObjectCfg = RigidObjectCfg(
+    # Snack
+    snack = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Snack",
         spawn=sim_utils.CuboidCfg(
             size=(0.08, 0.044, 0.048),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.733, 0.063)),
-            physics_material=sim_utils.RigidBodyMaterialCfg(),
-            physics_material_path="/World/Materials/SnackMaterial",
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,
+                dynamic_friction=0.8,
+                restitution=0.0,
+            ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.005),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            activate_contact_sensors=True,
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.25, -0.03, 0.059)), # Moved from 0.0 to -0.03 in Y
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.20, 0.0, 0.059)),
     )
 
     # Lights
-    dome_light: AssetBaseCfg = AssetBaseCfg(
-        prim_path="/World/Light", 
-        spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.05, 0.05, 0.05))
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
     )
 
 @configclass
 class ObservationsCfg:
+    """Configuration for observations."""
+
     @configclass
     class PolicyCfg(ObsGroup):
-        # 1. Robot Proprioception (10 joints)
+        """Configuration for policy observations."""
+        
+        # Joint state
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
         
-        # 2. End-effector (EE) State
-        ee_pos = ObsTerm(
-            func=custom_rewards.ee_pos_rel, 
-            params={"robot_cfg": SceneEntityCfg("robot", body_names="link_6")}
-        )
-        ee_quat = ObsTerm(
-            func=custom_rewards.ee_quat,
-            params={"robot_cfg": SceneEntityCfg("robot", body_names="link_6")}
+        # EE Pose (x,y,z, qw,qx,qy,qz)
+        ee_pose = ObsTerm(
+            func=mdp.body_pose_w,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["link_6"])},
         )
         
-        # 3. Target Position: Snack
-        obj_pos = ObsTerm(
-            func=custom_rewards.snack_pos_rel, 
-            params={"object_cfg": SceneEntityCfg("snack")}
-        )
-        
-        # 4. Relational Vectors
-        rel_ee_to_snack = ObsTerm(
-            func=custom_rewards.ee_to_snack_rel, 
-            params={
-                "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
-                "object_cfg": SceneEntityCfg("snack")
-            }
-        )
+        # Relative TCP position
+        rel_tcp_pos = ObsTerm(func=observations.relative_tcp_pos)
 
     policy: PolicyCfg = PolicyCfg()
 
 @configclass
 class ActionsCfg:
-    # Direct Joint Position Control (Easier to learn for reaching)
-    arm_action: JointPositionActionCfg = JointPositionActionCfg(
+    """Configuration for actions."""
+    
+    # Arm control: Absolute joint positions
+    arm_action: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(
         asset_name="robot",
         joint_names=["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"],
-        scale=0.15, # Reduced from 1.0 for smoothness
+        scale=0.1,                # Reduced from 0.5 to make movement much slower and smoother
         use_default_offset=True,
     )
     
-    # Direct Control for Gripper
-    gripper_action: JointPositionActionCfg = JointPositionActionCfg(
+    # Gripper control: Absolute joint positions
+    gripper_action: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(
         asset_name="robot",
         joint_names=["rh_.*"],
-        scale=0.55,
-        offset=0.55,
-        use_default_offset=False,
+        scale=0.1,                # Reduced for smoother gripper control
+        use_default_offset=True,
     )
 
 @configclass
 class RewardsCfg:
-    # Phase 1: Approach (Reaching + XY Align + Vertical + Open Gripper)
-    reaching_reward = RewTerm(
-        func=custom_rewards.reaching_ee_snack_l2,
-        weight=50.0, # Reduced from 100.0 for stability
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
-            "object_cfg": SceneEntityCfg("snack")
-        }
+    """Configuration for rewards."""
+    
+    # 1. Reaching reward
+    ee_distance = RewTerm(
+        func=rewards.ee_distance_reward,
+        weight=30.0,              # Increased from 10.0 for more aggressive reaching
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["link_6"])},
     )
-    xy_alignment_reward = RewTerm(
-        func=custom_rewards.ee_snack_xy_dist_reward,
-        weight=40.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
-            "object_cfg": SceneEntityCfg("snack")
-        }
+    
+    # 2. Orientation reward
+    ee_orientation = RewTerm(
+        func=rewards.ee_orientation_reward,
+        weight=20.0,              # Increased from 10.0 for extreme vertical precision
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["link_6"])},
     )
-    vertical_alignment_reward = RewTerm(
-        func=custom_rewards.ee_alignment_reward,
-        weight=100.0, # Increased from 50.0 to stay perfectly vertical
-        params={"robot_cfg": SceneEntityCfg("robot", body_names="link_6")}
-    )
-    gripper_open_reward = RewTerm(
-        func=custom_rewards.gripper_open_reward,
-        weight=5.0, 
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names="link_6", joint_names=["rh_.*"]),
-            "object_cfg": SceneEntityCfg("snack")
-        }
-    )
-
-    # Phase 2: Grasp (Z Proximity + Closing near object)
-    z_proximity_reward = RewTerm(
-        func=custom_rewards.ee_snack_z_dist_reward,
-        weight=25.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
-            "object_cfg": SceneEntityCfg("snack"),
-            "target_z_offset": 0.15 
-        }
-    )
-    pre_grasp_reward = RewTerm(
-        func=custom_rewards.pre_grasp_reward,
+    
+    # 3. Bonus for reaching target
+    reached_bonus = RewTerm(
+        func=rewards.reached_target_bonus,
         weight=100.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", body_names="link_6", joint_names=["rh_.*"]),
-            "object_cfg": SceneEntityCfg("snack")
-        }
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["link_6"]), "threshold": 0.02},
+    )
+    
+    # 4. Stay at target reward
+    halt_reward = RewTerm(
+        func=rewards.halt_reward,
+        weight=20.0,              # Increased from 2.0 to strongly penalize shivering at target
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["link_6"])},
     )
 
-    # Phase 3: Lift/Carry (Grasped + Carrying)
-    grasped_reward = RewTerm(
-        func=custom_rewards.object_is_grasped_reward,
-        weight=200.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot", joint_names=["rh_.*"]),
-            "object_cfg": SceneEntityCfg("snack")
-        }
+    # 5. Gripper open reward
+    gripper_open = RewTerm(
+        func=rewards.gripper_open_reward,
+        weight=5.0,               # Increased from 2.0
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["rh_.*"])},
     )
-    carrying_reward = RewTerm(
-        func=custom_rewards.object_carrying_reward,
-        weight=500.0,
-        params={"object_cfg": SceneEntityCfg("snack")}
+    
+    # 6. Undesired contact penalty (includes self-collision)
+    undesired_contacts = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={"threshold": 1.0, "sensor_cfg": SceneEntityCfg("contact_forces")},
     )
-
-    # Minimal Regularization (Let the robot move freely)
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.0001)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.0001)
+    
+    # Action penalties - Specifically targeting shivering
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.1)  # Increased from -0.01 to penalize jitter
+    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.01)     # Increased from -0.001 to penalize fast vibration
 
 @configclass
 class TerminationsCfg:
+    """Configuration for terminations."""
+    
+    # Episode timeout
     time_out = TermTerm(func=mdp.time_out, time_out=True)
-    object_dropped = TermTerm(
-        func=mdp.root_height_below_minimum,
-        params={"asset_cfg": SceneEntityCfg("snack"), "minimum_height": 0.01}
+    
+    # Terminate if gripper closes too much (enforce stay open)
+    gripper_closed = TermTerm(
+        func=mdp.joint_pos_out_of_manual_limit,
+        params={
+            "bounds": (-0.1, 0.5), # 0.0 is open, 1.1 is closed. Let's allow some movement.
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["rh_.*"]),
+        },
     )
-    # Success termination: if object is carried back to home
-    success = TermTerm(
-        func=mdp.root_height_below_minimum, # Dummy, we'll likely rely on time_out for now
-        params={"asset_cfg": SceneEntityCfg("snack"), "minimum_height": -1.0}
+
+    # Terminate if robot hits the floor/desk/snack
+    # We use a threshold of 1.0 Newton
+    illegal_contact = TermTerm(
+        func=mdp.illegal_contact,
+        params={"threshold": 1.0, "sensor_cfg": SceneEntityCfg("contact_forces")},
     )
 
 @configclass
 class EventsCfg:
+    """Configuration for events."""
+    
+    # Reset robot joints to initial position
     reset_robot = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
             "position_range": (1.0, 1.0),
             "velocity_range": (0.0, 0.0),
-        }
-    )
-    reset_object = EventTerm(
-        func=mdp.reset_root_state_uniform,
-        mode="reset",
-        params={
-            "pose_range": {},
-            "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("snack")
-        }
+        },
     )
 
 @configclass
 class DoosanE0509PickEnvCfg(ManagerBasedRLEnvCfg):
+    """Configuration for the environment."""
+    
     # Scene settings
     scene: DoosanE0509SceneCfg = DoosanE0509SceneCfg(num_envs=4096, env_spacing=2.5)
     
@@ -307,25 +282,13 @@ class DoosanE0509PickEnvCfg(ManagerBasedRLEnvCfg):
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventsCfg = EventsCfg()
 
-    # Time/Episode settings
-    decimation = 4
-    episode_length_s = 25.0 # Increased from 20.0 to give more time for return
+    # Episode settings
+    decimation = 2
+    episode_length_s = 10.0
 
     # Simulation settings
-    sim = sim_utils.SimulationCfg(
-        dt=1.0 / 120.0, 
+    sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
+        dt=1.0 / 60.0,
         render_interval=decimation,
         device="cuda:0",
-        physx=sim_utils.PhysxCfg(
-            gpu_max_rigid_contact_count=2**24,
-            gpu_max_rigid_patch_count=2**18,
-            gpu_found_lost_aggregate_pairs_capacity=2**21,
-            gpu_found_lost_pairs_capacity=2**21,
-            gpu_total_aggregate_pairs_capacity=2**21,
-            gpu_max_soft_body_contacts=2**21,
-            gpu_max_particle_contacts=2**21,
-            gpu_heap_capacity=2**27,
-            gpu_temp_buffer_capacity=2**25,
-            gpu_max_num_partitions=8,
-        ),
     )

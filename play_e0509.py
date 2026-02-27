@@ -72,6 +72,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
+import isaaclab.sim as sim_utils
 from isaaclab.envs import (
     DirectMARLEnv,
     DirectMARLEnvCfg,
@@ -211,6 +212,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"Loading checkpoint from: {checkpoint_path}")
     agent = PPO.load(checkpoint_path, env, print_system_info=True)
 
+    # ---------------
+    # E0509 추가 (Target Visualization)
+    # ---------------
+    from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+    
+    # Red sphere marker
+    marker_cfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/TargetMarker",
+        markers={
+            "sphere": sim_utils.SphereCfg(
+                radius=0.02,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            ),
+        },
+    )
+    target_marker = VisualizationMarkers(marker_cfg)
+
     dt = env.unwrapped.step_dt
 
     # reset environment
@@ -218,6 +236,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
+        # Update marker position
+        with torch.inference_mode():
+            snack_pos = env.unwrapped.scene["snack"].data.root_pos_w[:, :3].clone()
+            snack_pos[:, 2] += 0.048 / 2.0 + 0.03
+            target_marker.visualize(snack_pos)
+
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():

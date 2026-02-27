@@ -4,7 +4,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from .env_cfg import DoosanE0509PickEnvCfg
 
 class DoosanE0509PickEnv(ManagerBasedRLEnv):
-    """Environment for picking objects with the Doosan E0509 robot using a manager-based approach."""
+    """Environment for Doosan E0509 robot."""
     
     cfg: DoosanE0509PickEnvCfg
 
