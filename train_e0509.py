@@ -84,7 +84,7 @@ from datetime import datetime
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, LogEveryNTimesteps
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, LogEveryNTimesteps
 from stable_baselines3.common.vec_env import VecNormalize
 
 from isaaclab.envs import (
@@ -112,6 +112,31 @@ import importlib
 # import logger
 logger = logging.getLogger(__name__)
 # PLACEHOLDER: Extension template (do not remove this comment)
+
+
+class StageMetricsCallback(BaseCallback):
+    """extras['log']의 stage_mean, success_rate를 tensorboard에 기록."""
+
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self._stage_buf: list[float] = []
+        self._success_buf: list[float] = []
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            ep = info.get("episode")
+            if ep is None:
+                continue
+            if "stage_mean" in ep:
+                self._stage_buf.append(float(ep["stage_mean"]))
+            if "success_rate" in ep:
+                self._success_buf.append(float(ep["success_rate"]))
+        if self._stage_buf:
+            self.logger.record("custom/stage_mean", np.mean(self._stage_buf))
+            self.logger.record("custom/success_rate", np.mean(self._success_buf))
+            self._stage_buf.clear()
+            self._success_buf.clear()
+        return True
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -235,7 +260,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # callbacks for agent
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
-    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval), StageMetricsCallback()]
 
     # train the agent
     with contextlib.suppress(KeyboardInterrupt):

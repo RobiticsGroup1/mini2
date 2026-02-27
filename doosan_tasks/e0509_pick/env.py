@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import torch
 import gymnasium as gym
 
@@ -50,6 +51,9 @@ class DoosanE0509PickEnv(DirectRLEnv):
         self.home_ee_pos_l = torch.zeros((self.num_envs, 3), device=self.device)
         self.default_arm_q = self.robot.data.default_joint_pos[:, self.arm_joint_ids].clone()
 
+        # Doosan E0509 joint limits: all axes ±360° = ±2π rad
+        self.joint_limit_rad = math.pi * 2.0
+
         self.current_targets = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
         self.task_stage = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.stage_timer = torch.zeros(self.num_envs, device=self.device)
@@ -98,23 +102,13 @@ class DoosanE0509PickEnv(DirectRLEnv):
         self._actions = torch.clamp(actions, -1.0, 1.0)
 
         # ---------------------------------------------------------------------
-        # Gripper gating by stage (demo-friendly)
-        # action[6] mapping (see _apply_action):
-        #   -1.0 -> Open  (0.0 joint target)
-        #   +1.0 -> Close (1.1 joint target)
+        # Gripper gating by stage (2-stage)
+        # action[6] mapping: -1.0 -> Open (0.0 rad), +1.0 -> Close (1.1 rad)
+        # Stage 0: Approach → always OPEN
+        # Stage 1: Lift     → always CLOSED
         # ---------------------------------------------------------------------
-        stage0 = (self.task_stage == 0)  # Approach
-        stage1 = (self.task_stage == 1)  # Grip
-        stage2_3 = (self.task_stage >= 2) & (self.task_stage <= 3)  # Lift + Return Home
-
-        # Stage 0: always approach with OPEN gripper.
-        self._actions[stage0, 6] = -1.0
-
-        # Stage 2~3: keep CLOSED to avoid accidental release while lifting/returning.
-        self._actions[stage2_3, 6] = 1.0
-
-        # Stage 1: allow policy to close, but only in the closing direction (reduces jitter).
-        self._actions[stage1, 6] = torch.clamp(self._actions[stage1, 6], 0.0, 1.0)
+        self._actions[self.task_stage == 0, 6] = -1.0
+        self._actions[self.task_stage == 1, 6] = 1.0
 
         self._apply_action()
 
@@ -122,8 +116,15 @@ class DoosanE0509PickEnv(DirectRLEnv):
         # Arm delta control
         self.current_targets[:, self.arm_joint_ids] += self._actions[:, :6] * self.cfg.action_scale
 
+        # Hard clamp to ±360° joint limits (Doosan E0509 spec)
+        self.current_targets[:, self.arm_joint_ids] = torch.clamp(
+            self.current_targets[:, self.arm_joint_ids],
+            -self.joint_limit_rad,
+            self.joint_limit_rad,
+        )
+
         # Gripper absolute control [0, 1.1]
-        # Mapping: 1.0 (Action) -> 1.1 (Closed), -1.0 (Action) -> 0.0 (Open)
+        # Mapping: +1.0 (Action) -> 1.1 rad (Closed), -1.0 (Action) -> 0.0 rad (Open)
         gripper_pos = (self._actions[:, 6:7] + 1.0) / 2.0 * 1.1
         self.current_targets[:, self.gripper_joint_ids] = gripper_pos
 
@@ -144,16 +145,24 @@ class DoosanE0509PickEnv(DirectRLEnv):
         snack_pos_l = self.snack.data.root_pos_w[:, :3] - self.scene.env_origins
         ee_to_snack_l = snack_pos_l - ee_pos_l
 
+        # EE z-axis in world frame: (0,0,-1) = gripper pointing straight down
+        ee_quat_w = self.robot.data.body_quat_w[:, self.ee_body_id, :]
+        ee_z_axis = quat_rotate(
+            ee_quat_w,
+            torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1),
+        )
+
         obs = torch.cat(
             [
-                q,
-                qd,
-                ee_pos_l,
-                snack_pos_l,
-                self.home_ee_pos_l,
-                ee_to_snack_l,
-                self.task_stage.float().unsqueeze(-1),
-                (self.stage_timer / self.cfg.episode_length_s).unsqueeze(-1),
+                q,                                                    # 10
+                qd,                                                   # 10
+                ee_pos_l,                                             #  3
+                snack_pos_l,                                          #  3
+                self.home_ee_pos_l,                                   #  3
+                ee_to_snack_l,                                        #  3
+                ee_z_axis,                                            #  3  ← 그리퍼 방향
+                self.task_stage.float().unsqueeze(-1),                #  1
+                (self.stage_timer / self.cfg.episode_length_s).unsqueeze(-1),  #  1
             ],
             dim=-1,
         )
@@ -161,116 +170,128 @@ class DoosanE0509PickEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         self.stage_timer += self.cfg.sim.dt * self.cfg.decimation
-        eps = 1e-8 # NaN 방지를 위한 미소값
+        eps = 1e-8
 
-        # 1. 좌표 및 상태 업데이트 (벡터화 유지)
+        # ── 공통 상태 계산 ──
         ee_pos_l = self._get_ee_tip_pos_l()
         snack_pos_l = self.snack.data.root_pos_w[:, :3] - self.scene.env_origins
-        ee_quat_w = self.robot.data.body_quat_w[:, self.ee_body_id, :]
-
-        # 거리 계산 (eps 추가로 NaN 방지)
         dist_ee_snack = torch.norm(ee_pos_l - snack_pos_l, dim=-1) + eps
-        dist_ee_home = torch.norm(ee_pos_l - self.home_ee_pos_l, dim=-1) + eps
 
         arm_q = self.robot.data.joint_pos[:, self.arm_joint_ids]
-        dist_joint_home = torch.norm(arm_q - self.default_arm_q, dim=-1) + eps
 
-        # 그리퍼 방향 (아래를 향하도록)
-        down_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
+        # 그리퍼 하향 정렬 (위에서 접근 유도)
+        ee_quat_w = self.robot.data.body_quat_w[:, self.ee_body_id, :]
         ee_z_axis = quat_rotate(
             ee_quat_w,
             torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1),
         )
+        down_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         align_dot = torch.clamp(torch.sum(ee_z_axis * down_vec, dim=-1), min=0.0, max=1.0)
 
-        # 속도 제어
+        # 속도
         ee_vel_w = self.robot.data.body_lin_vel_w[:, self.ee_body_id, :]
         ee_speed = torch.norm(ee_vel_w, dim=-1)
 
-        # 그리퍼 상태
-        gripper_q = self.robot.data.joint_pos[:, self.gripper_joint_ids]
-        gripper_closed = gripper_q.mean(dim=-1) > 0.7 
-
-        rewards = torch.zeros(self.num_envs, device=self.device)
-
-        # 마스크 설정
-        stage_masks = [self.task_stage == i for i in range(5)]
-
-        # --- Stage 0: Approach ---
-        # 수평 거리를 더 엄격하게 벌점 주어 위에서 아래로 접근하게 유도
-        horiz_dist = torch.norm(ee_pos_l[:, :2] - snack_pos_l[:, :2], dim=-1)
-        rewards[stage_masks[0]] = torch.exp(-5.0 * dist_ee_snack[stage_masks[0]]) * self.cfg.reach_reward_scale
-        rewards[stage_masks[0]] += align_dot[stage_masks[0]] * 5.0
-        rewards[stage_masks[0]] -= horiz_dist[stage_masks[0]] * 3.0 # 수평 오차 벌점 강화
-
-        # --- Stage 1: Grip (강화됨) ---
-        # 단순히 닫는 명령뿐 아니라, 닫았을 때 물체와 손의 거리가 가까워야 보상
-        grip_command = self._actions[:, 6]
-        rewards[stage_masks[1]] = grip_command[stage_masks[1]] * self.cfg.grasp_reward_scale
-        rewards[stage_masks[1]] += (dist_ee_snack[stage_masks[1]] < 0.05).float() * 10.0 # 근접 보너스
-
-        # --- Stage 2: Lift (강화됨) ---
-        # 물체가 들렸더라도 손에서 멀어지면(튕겨나가면) 보상 삭제
+        # 물체 hold 여부 및 lift
         is_holding = dist_ee_snack < 0.08
         lift_height = torch.clamp(snack_pos_l[:, 2] - 0.059, min=0.0)
-        rewards[stage_masks[2]] = lift_height[stage_masks[2]] * self.cfg.lift_reward_scale * is_holding[stage_masks[2]].float()
-        rewards[stage_masks[2]] -= (~is_holding[stage_masks[2]]).float() * 20.0 # 놓치면 벌점
 
-        # --- Stage 3: Return Home ---
-        # 물체를 유지한 채로 복귀할 때만 높은 보상
-        rewards[stage_masks[3]] = (1.0 - torch.tanh(dist_ee_home[stage_masks[3]] / 0.3)) * self.cfg.home_reward_scale
-        rewards[stage_masks[3]] += is_holding[stage_masks[3]].float() * 20.0 # 유지 보상
+        # 거리 가중 align: 멀 때(>0.2m)는 0, 가까울수록 최대 3.0
+        align_near = align_dot * torch.clamp(1.0 - dist_ee_snack / 0.2, min=0.0) * 3.0
 
-        # --- Stage 4: Release ---
-        rewards[stage_masks[4]] = self.cfg.home_reward_scale
-        open_score = (1.0 - grip_command[stage_masks[4]]) # 1에 가까울수록 잘 연 것
-        rewards[stage_masks[4]] += open_score * 15.0
+        # 스낵 정위에서 접근 유도: xy 정렬 + EE가 스낵보다 위에 있을 때 보상
+        xy_dist_to_snack = torch.norm(ee_pos_l[:, :2] - snack_pos_l[:, :2], dim=-1) + eps
+        above_snack = (ee_pos_l[:, 2] > snack_pos_l[:, 2]).float()
+        above_reward = torch.exp(-6.0 * xy_dist_to_snack) * above_snack * 5.0
 
-        # ── 전환 로직 (안전 장치 추가) ──
-        # 0 -> 1: 충분히 접근했을 때
-        reached_snack = (dist_ee_snack < self.cfg.reach_success_dist) & stage_masks[0]
+        rewards = torch.zeros(self.num_envs, device=self.device)
+        stage_masks = [self.task_stage == i for i in range(2)]
+
+        # ── Stage 0: Approach (그리퍼 열린 채 접근) ──
+        # 거리 보상에 align_dot을 곱함: 수평 접근(align_dot≈0)이면 보상 자체가 0
+        # above_reward: 스낵 바로 위에서 내려오는 접근 유도
+        rewards[stage_masks[0]] = (
+            torch.exp(-4.0 * dist_ee_snack[stage_masks[0]]) * self.cfg.reach_reward_scale * align_dot[stage_masks[0]]
+            + align_near[stage_masks[0]]
+            + above_reward[stage_masks[0]]
+            - torch.clamp(ee_speed[stage_masks[0]] - 0.5, min=0.0) * 2.0
+        )
+
+        # ── Stage 1: Lift (그리퍼 강제 닫힘, 들어올리기) ──
+        # 접근 보상 제거: exp(-4*dist)*10 은 "snack 위에 누우면 최대" 라는 exploit 유발
+        # 대신 is_holding 여부로만 구분: 잡고 있으면 소정 보상 + lift, 못 잡으면 소정 패널티
+        rewards[stage_masks[1]] = (
+            lift_height[stage_masks[1]] * self.cfg.lift_reward_scale * is_holding[stage_masks[1]].float()
+            + is_holding[stage_masks[1]].float() * 2.0
+            - (~is_holding[stage_masks[1]]).float() * 2.0
+        )
+
+        # ── 전환 로직 ──
+        # 자발 전환: dist < 0.06m + 그리퍼가 스낵 위에서 내려오는 자세일 때만 전환
+        # (align_dot > 0.5: 그리퍼 하향, ee_above: EE가 스낵보다 위)
+        ee_above = ee_pos_l[:, 2] > snack_pos_l[:, 2] - 0.01
+        reached_snack = (dist_ee_snack < self.cfg.reach_success_dist) & stage_masks[0] & (align_dot > 0.5) & ee_above
         self.task_stage[reached_snack] = 1
         self.stage_timer[reached_snack] = 0.0
         rewards[reached_snack] += self.cfg.grasp_success_reward
 
-        # 1 -> 2: 닫기 시작한 후 약간의 시간 대기 (물리 안정화)
-        gripped = (self.stage_timer > 0.3) & gripper_closed & stage_masks[1]
-        self.task_stage[gripped] = 2
-        self.stage_timer[gripped] = 0.0
-        rewards[gripped] += self.cfg.lift_success_reward
+        # 강제 전환: 3초(≈90스텝) 후 자세 무관하게 Stage 1 진입 → Stage 0 회피 불가
+        force_stage1 = (self.stage_timer > 3.0) & (self.task_stage == 0)
+        self.task_stage[force_stage1] = 1
+        self.stage_timer[force_stage1] = 0.0
 
-        # 2 -> 3: 실제로 물체가 들렸고 + 여전히 손에 있을 때만 전환
-        is_lifted = (snack_pos_l[:, 2] > 0.15) & is_holding & stage_masks[2]
-        self.task_stage[is_lifted] = 3
-        self.stage_timer[is_lifted] = 0.0
+        # ── 공통 벌점 ──
+        # Stage 1 중 snack 추락
+        drop = (self.task_stage == 1) & (snack_pos_l[:, 2] < 0.045)
+        rewards[drop] -= 100.0
 
-        # 3 -> 4: 홈 포지션 근처 도달
-        reached_home = (dist_ee_home < self.cfg.home_success_dist) & stage_masks[3]
-        self.task_stage[reached_home] = 4
-        self.stage_timer[reached_home] = 0.0
-
-        # 공통 벌점 (추락 및 행동 제약)
-        drop = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.06))
-        rewards[drop] -= 100.0 # 추락 벌점 강화
+        # 관절 한계 소프트 벌점 (±360° 도달 전 경고 구역: soft limit ≈ ±331°)
+        soft_limit = self.joint_limit_rad - 0.5  # ≈ 5.78 rad
+        joint_excess = torch.clamp(torch.abs(arm_q) - soft_limit, min=0.0)
+        r_joint_limit = -torch.sum(joint_excess, dim=-1) * self.cfg.joint_limit_penalty_scale
 
         r_act = -torch.sum(torch.square(self._actions), dim=-1) * self.cfg.action_penalty_scale
         r_vel = -torch.sum(torch.square(self.robot.data.joint_vel), dim=-1) * self.cfg.joint_vel_penalty_scale
 
-        # 성공 판정 로그
-        success = ((self.task_stage == 4) & (self.stage_timer > 0.5)).float()
-        self.extras["log"]["success_rate"] = success.mean()
+        # 성공 보너스: 성공 시 즉시 큰 보너스 지급 (호버링보다 성공이 유리하게)
+        success = (self.task_stage == 1) & (snack_pos_l[:, 2] > self.cfg.lift_success_height) & is_holding
+        rewards[success] += self.cfg.lift_success_reward
 
-        return rewards + r_act + r_vel
+        # 로그
+        self.extras["log"]["success_rate"] = success.float().mean()
+        self.extras["log"]["stage_mean"] = self.task_stage.float().mean()
+
+        # 진단용 콘솔 출력 (5000 스텝마다)
+        if not hasattr(self, "_diag_step"):
+            self._diag_step = 0
+        self._diag_step += 1
+        if self._diag_step % 5000 == 0:
+            stage_counts = [(self.task_stage == i).sum().item() for i in range(2)]
+            total = self.num_envs
+            print(
+                f"[diag step={self._diag_step}] "
+                f"stage0={stage_counts[0]/total:.1%} "
+                f"stage1={stage_counts[1]/total:.1%} | "
+                f"dist_mean={dist_ee_snack.mean():.3f}m | "
+                f"align_dot={align_dot.mean():.3f} | "
+                f"success={success.float().mean():.3%}"
+            )
+
+        return rewards + r_act + r_vel + r_joint_limit
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         truncated = self.episode_length_buf >= self.max_episode_length - 1
 
         snack_pos_l = self.snack.data.root_pos_w[:, :3] - self.scene.env_origins
-        drop = ((self.task_stage >= 2) & (snack_pos_l[:, 2] < 0.05))
 
-        gripper_q = self.robot.data.joint_pos[:, self.gripper_joint_ids]
-        gripper_open = gripper_q.mean(dim=-1) < 0.2
-        success = (self.task_stage == 4) & (self.stage_timer > 0.5) & gripper_open
+        # Stage 1 중 snack 추락 → 실패 종료
+        drop = (self.task_stage == 1) & (snack_pos_l[:, 2] < 0.045)
+
+        # Stage 1: snack을 target 높이까지 들어올리고 + 여전히 잡고 있으면 성공 종료
+        ee_pos_l = self._get_ee_tip_pos_l()
+        dist_ee_snack = torch.norm(ee_pos_l - snack_pos_l, dim=-1)
+        is_holding = dist_ee_snack < 0.08
+        success = (self.task_stage == 1) & (snack_pos_l[:, 2] > self.cfg.lift_success_height) & is_holding
 
         terminated = success | drop
         return terminated, truncated

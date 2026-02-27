@@ -5,7 +5,21 @@
 Isaac Lab + Stable-Baselines3(PPO)를 사용하는 Doosan E0509 로봇 팔 RL 환경.
 현재 구현된 태스크: `reach`, `pick`, `pick_place`
 
-**pick 태스크 목표**: 그리퍼를 열고 물체에 접근 → 물체를 집어 들어 올림 → 초기 위치로 복귀
+**pick 태스크 목표**: 그리퍼를 열고 물체에 접근 → 물체를 집어 들어 올림
+
+## Doosan Robotics E0509 Joint Motion Range
+- 이 모델은 모든 축이 360° 연속 회전(continuous rotation) 구조로, 기계적 한계각이 ±170° 같은 구조가 아니라, 이론적으로는 한 바퀴 이상 회전이 가능하다.
+
+| Joint | Axis     | Motion Range |
+| ----- | -------- | ------------ |
+| J1    | Base     | ±360°        |
+| J2    | Shoulder | ±360°        |
+| J3    | Elbow    | ±360°        |
+| J4    | Wrist 1  | ±360°        |
+| J5    | Wrist 2  | ±360°        |
+| J6    | Wrist 3  | ±360°        |
+
+
 
 ---
 
@@ -31,20 +45,17 @@ mini2/
 
 ```bash
 # 학습 (권장)
-python train_e0509.py --task DoosanE0509-Pick-v0 --num_envs 4096 --headless
-
-# 학습 (GPU 메모리 부족 시)
-python train_e0509.py --task DoosanE0509-Pick-v0 --num_envs 2048 --headless
+./isaaclab.sh -p mini2/train_e0509.py --task DoosanE0509-Pick-v0 --num_envs 4096 --device cuda:0 --headless --keep_all_info
 
 # 체크포인트에서 이어서
-python train_e0509.py --task DoosanE0509-Pick-v0 --num_envs 4096 --headless \
+./isaaclab.sh -p mini2/train_e0509.py --task DoosanE0509-Pick-v0 --num_envs 4096 --device cuda:0 --headless \
   --checkpoint logs/sb3/DoosanE0509-Pick-v0/<timestamp>/model_XXXXX_steps.zip
 
 # 시각화 (마지막 체크포인트)
-python play_e0509.py --task DoosanE0509-Pick-v0 --num_envs 4 --use_last_checkpoint
+./isaaclab.sh -p mini2/play_e0509.py --task "DoosanE0509-Pick-v0" --num_envs 1 --use_last_checkpoint
 
 # 시각화 (특정 체크포인트)
-python play_e0509.py --task DoosanE0509-Pick-v0 --checkpoint logs/sb3/.../model.zip
+./isaaclab.sh -p mini2/play_e0509.py --task "DoosanE0509-Pick-v0" --num_envs 1 --checkpoint logs/sb3/.../model.zip
 ```
 
 로그 및 텐서보드: `logs/sb3/DoosanE0509-Pick-v0/<timestamp>/`
@@ -57,14 +68,12 @@ tensorboard --logdir logs/sb3/DoosanE0509-Pick-v0
 
 ## pick 태스크 아키텍처
 
-### Stage 구조 (task_stage: 0~4)
-| Stage | 이름 | 설명 | 전환 조건 |
+### Stage 구조 (task_stage: 0~2)
+| Stage | 이름 | 설명 | 전환/종료 조건 |
 |-------|------|------|-----------|
 | 0 | Approach | 그리퍼 열고 snack에 접근 | `dist_ee_snack < reach_success_dist (0.04m)` |
-| 1 | Grip | 그리퍼 닫기 | `stage_timer > 0.5s` & `gripper_q.mean > 0.7` |
-| 2 | Lift | snack 들어올리기 | `snack_pos_z > 0.12m` |
-| 3 | Return Home | 초기 위치로 복귀 | `dist_ee_home < 0.05m` & `dist_joint_home < 0.15` & `snack_z > 0.10m` |
-| 4 | Release | 홈에서 그리퍼 열기 | success 조건 → terminate |
+| 1 | Grip | 그리퍼 닫기 | `stage_timer > 0.3s` & `gripper_q.mean > 0.7` |
+| 2 | Lift | snack 들어올리기 | `snack_z > lift_success_height (0.15m)` & `is_holding` → **success terminate** |
 
 ### Action Space (dim=7)
 - `action[:6]`: 팔 6개 관절 **delta** 제어 (scale: 0.02 rad/step)
@@ -73,8 +82,11 @@ tensorboard --logdir logs/sb3/DoosanE0509-Pick-v0
 **Gripper Gating** (`_pre_physics_step`에서 stage별 강제 적용):
 - Stage 0: 항상 열림(-1.0)
 - Stage 1: 닫히는 방향만 허용 (clamp to [0, 1])
-- Stage 2~3: 항상 닫힘(+1.0)
-- Stage 4: 정책이 자유롭게 제어 (열도록 reward)
+- Stage 2: 항상 닫힘(+1.0)
+
+**관절 한계 적용**:
+- `_apply_action`에서 `current_targets`를 `±2π rad`로 하드 클램프 (Doosan E0509 ±360°)
+- `_get_rewards`에서 soft limit (±331°, `2π - 0.5 rad`) 초과 시 추가 벌점
 
 ### Observation Space (dim=34)
 ```
@@ -126,9 +138,10 @@ q(10) + qd(10) + ee_pos_l(3) + snack_pos_l(3) + home_ee_pos_l(3) + ee_to_snack_l
 | `episode_length_s` | 20.0 s | 에피소드 최대 길이 |
 | `action_scale` | 0.02 | 팔 관절 delta 스케일 |
 | `reach_success_dist` | 0.04 m | Stage 0→1 전환 거리 |
-| `home_success_dist` | 0.05 m | Stage 3→4 전환 거리 |
+| `lift_success_height` | 0.15 m | Stage 2 성공 판정 snack z 높이 |
 | `lift_reward_scale` | 100.0 | Stage 2 lift 보상 계수 |
 | `reach_reward_scale` | 20.0 | Stage 0 접근 보상 계수 (local optimum 방지용으로 크게 설정) |
+| `joint_limit_penalty_scale` | 5.0 | ±360° 관절 한계 소프트 벌점 계수 |
 
 ---
 

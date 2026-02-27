@@ -63,11 +63,11 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
 
     # Observation/Action dimensions
     action_dim: int = 7
-    obs_dim: int = 34  
+    obs_dim: int = 37  # +3: EE z-axis vector (gripper orientation)
 
     observation_space: gym.Space = field(
         default_factory=lambda: gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(34,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(37,), dtype=np.float32
         )
     )
     action_space: gym.Space = field(
@@ -150,8 +150,8 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
             ),
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["rh_.*"],
-                stiffness=1000.0,
-                damping=100.0,
+                stiffness=4000.0,  # 1000 → 4000: 들어올릴 때 손가락 밀림 방지
+                damping=400.0,     # 100 → 400
             ),
         },
     )
@@ -199,7 +199,7 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
     )
 
     ee_link_name: str = "link_6"
-    ee_offset = (0.0, 0.0, 0.13)
+    ee_offset = (0.0, 0.0, 0.11)  # 0.13 → 0.11: 실제 파지 중심은 link_6에서 ~0.106m
     
     # Reward scales
     reach_reward_scale = 20.0
@@ -209,14 +209,15 @@ class DoosanE0509PickEnvCfg(DirectRLEnvCfg):
     
     # Transition bonuses
     grasp_success_reward = 20.0
-    lift_success_reward = 50.0
+    lift_success_reward = 3000.0
 
     action_penalty_scale = 0.01
     joint_vel_penalty_scale = 0.005
+    joint_limit_penalty_scale = 5.0  # Soft penalty near ±360° (Doosan E0509)
 
     # Thresholds
-    reach_success_dist = 0.04
-    home_success_dist = 0.05
+    reach_success_dist = 0.06  # 0.04 → 0.06: Stage 0 회피 방지 (agent가 0.05m에 멈추는 전략 차단)
+    lift_success_height = 0.15  # snack z [local] for lift success / terminate
 
     # Action properties
     action_scale: float = 0.02
