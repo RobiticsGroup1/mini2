@@ -10,6 +10,5 @@ outputs/
 *.dae.usd
 *.stl.usd
 *.urdf.usd
-play_e0509.py
 GEMINI.md
 summary.txt

@@ -33,9 +33,9 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--keep_all_info",
-    action="store_false",
+    action="store_true",
     dest="keep_all_info",
-    default=True,
+    default=False,
     help="Use a slower SB3 wrapper but keep all the extra training info.",
 )
 parser.add_argument(
@@ -85,8 +85,24 @@ from datetime import datetime
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, LogEveryNTimesteps
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, LogEveryNTimesteps
 from stable_baselines3.common.vec_env import VecNormalize
+
+class RewardLoggerCallback(BaseCallback):
+    """Custom callback for logging individual reward terms from the environment info."""
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+
+    def _on_step(self) -> bool:
+        # Check if we have episode info (SB3 adds this to infos on reset)
+        for info in self.locals["infos"]:
+            if info is not None and info.get("episode") is not None:
+                # Log all custom reward terms found in the episode info
+                for key, value in info["episode"].items():
+                    # Skip total reward (r), length (l), and time (t)
+                    if key not in ["r", "l", "t"]:
+                        self.logger.record(f"rewards/{key}", value)
+        return True
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -236,7 +252,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # callbacks for agent
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
-    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    reward_logger_callback = RewardLoggerCallback()
+    callbacks = [checkpoint_callback, reward_logger_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
 
     # train the agent
     with contextlib.suppress(KeyboardInterrupt):

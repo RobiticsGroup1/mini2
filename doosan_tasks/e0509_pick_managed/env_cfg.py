@@ -41,7 +41,7 @@ class DoosanE0509SceneCfg(InteractiveSceneCfg):
                 target_type="position",
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
                     stiffness=5000.0,
-                    damping=500.0,
+                    damping=800.0,
                 ),
             ),
             activate_contact_sensors=True,
@@ -128,7 +128,7 @@ class DoosanE0509SceneCfg(InteractiveSceneCfg):
             mass_props=sim_utils.MassPropertiesCfg(mass=0.005),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.10, 0.0, 0.059)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.25, -0.03, 0.059)), # Moved from 0.0 to -0.03 in Y
     )
 
     # Lights
@@ -148,6 +148,10 @@ class ObservationsCfg:
         # 2. End-effector (EE) State
         ee_pos = ObsTerm(
             func=custom_rewards.ee_pos_rel, 
+            params={"robot_cfg": SceneEntityCfg("robot", body_names="link_6")}
+        )
+        ee_quat = ObsTerm(
+            func=custom_rewards.ee_quat,
             params={"robot_cfg": SceneEntityCfg("robot", body_names="link_6")}
         )
         
@@ -170,21 +174,18 @@ class ObservationsCfg:
 
 @configclass
 class ActionsCfg:
-    # Inverse Kinematics Control for Arm
-    arm_action: RelativeJointPositionActionCfg = RelativeJointPositionActionCfg(
+    # Direct Joint Position Control (Easier to learn for reaching)
+    arm_action: JointPositionActionCfg = JointPositionActionCfg(
         asset_name="robot",
         joint_names=["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"],
-        scale=0.015,
-        use_zero_offset=True,
+        scale=0.15, # Reduced from 1.0 for smoothness
+        use_default_offset=True,
     )
     
     # Direct Control for Gripper
     gripper_action: JointPositionActionCfg = JointPositionActionCfg(
         asset_name="robot",
         joint_names=["rh_.*"],
-        # JointPositionAction is: action = offset + scale * input_action
-        # If input is [-1, 1], and we want [0, 1.1]:
-        # scale = 0.55, offset = 0.55
         scale=0.55,
         offset=0.55,
         use_default_offset=False,
@@ -192,31 +193,74 @@ class ActionsCfg:
 
 @configclass
 class RewardsCfg:
+    # Phase 1: Approach (Reaching + XY Align + Vertical + Open Gripper)
     reaching_reward = RewTerm(
         func=custom_rewards.reaching_ee_snack_l2,
-        weight=10.0,
+        weight=50.0, # Reduced from 100.0 for stability
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
             "object_cfg": SceneEntityCfg("snack")
         }
     )
-    alignment_reward = RewTerm(
+    xy_alignment_reward = RewTerm(
+        func=custom_rewards.ee_snack_xy_dist_reward,
+        weight=40.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
+            "object_cfg": SceneEntityCfg("snack")
+        }
+    )
+    vertical_alignment_reward = RewTerm(
         func=custom_rewards.ee_alignment_reward,
-        weight=2.0,
+        weight=100.0, # Increased from 50.0 to stay perfectly vertical
         params={"robot_cfg": SceneEntityCfg("robot", body_names="link_6")}
     )
-    grasping_reward = RewTerm(
-        func=custom_rewards.gripper_is_closed,
-        weight=5.0,
-        params={"robot_cfg": SceneEntityCfg("robot", joint_names=["rh_.*"])}
+    gripper_open_reward = RewTerm(
+        func=custom_rewards.gripper_open_reward,
+        weight=5.0, 
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names="link_6", joint_names=["rh_.*"]),
+            "object_cfg": SceneEntityCfg("snack")
+        }
+    )
+
+    # Phase 2: Grasp (Z Proximity + Closing near object)
+    z_proximity_reward = RewTerm(
+        func=custom_rewards.ee_snack_z_dist_reward,
+        weight=25.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names="link_6"), 
+            "object_cfg": SceneEntityCfg("snack"),
+            "target_z_offset": 0.15 
+        }
+    )
+    pre_grasp_reward = RewTerm(
+        func=custom_rewards.pre_grasp_reward,
+        weight=100.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names="link_6", joint_names=["rh_.*"]),
+            "object_cfg": SceneEntityCfg("snack")
+        }
+    )
+
+    # Phase 3: Lift/Carry (Grasped + Carrying)
+    grasped_reward = RewTerm(
+        func=custom_rewards.object_is_grasped_reward,
+        weight=200.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot", joint_names=["rh_.*"]),
+            "object_cfg": SceneEntityCfg("snack")
+        }
     )
     carrying_reward = RewTerm(
         func=custom_rewards.object_carrying_reward,
-        weight=25.0,
+        weight=500.0,
         params={"object_cfg": SceneEntityCfg("snack")}
     )
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.005)
+
+    # Minimal Regularization (Let the robot move freely)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.0001)
+    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.0001)
 
 @configclass
 class TerminationsCfg:
@@ -224,6 +268,11 @@ class TerminationsCfg:
     object_dropped = TermTerm(
         func=mdp.root_height_below_minimum,
         params={"asset_cfg": SceneEntityCfg("snack"), "minimum_height": 0.01}
+    )
+    # Success termination: if object is carried back to home
+    success = TermTerm(
+        func=mdp.root_height_below_minimum, # Dummy, we'll likely rely on time_out for now
+        params={"asset_cfg": SceneEntityCfg("snack"), "minimum_height": -1.0}
     )
 
 @configclass
@@ -249,7 +298,7 @@ class EventsCfg:
 @configclass
 class DoosanE0509PickEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: DoosanE0509SceneCfg = DoosanE0509SceneCfg(num_envs=64, env_spacing=2.5)
+    scene: DoosanE0509SceneCfg = DoosanE0509SceneCfg(num_envs=4096, env_spacing=2.5)
     
     # Manager settings
     observations: ObservationsCfg = ObservationsCfg()
@@ -260,7 +309,7 @@ class DoosanE0509PickEnvCfg(ManagerBasedRLEnvCfg):
 
     # Time/Episode settings
     decimation = 4
-    episode_length_s = 20.0 
+    episode_length_s = 25.0 # Increased from 20.0 to give more time for return
 
     # Simulation settings
     sim = sim_utils.SimulationCfg(
