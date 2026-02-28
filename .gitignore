@@ -12,3 +12,7 @@ outputs/
 *.urdf.usd
 GEMINI.md
 summary.txt
+models/
+check_init_pos.py
+check_pre_grasp_pos.py
+status/
